@@ -1,0 +1,17 @@
+self: play -> kafka 0.1
+
+require:
+    - play
+    - play -> scala 0.9.1
+
+    # needed for kafka
+    - org.clojars.paul -> kafka 0.6
+    - com.github.sgroschupf -> zkclient 0.1
+
+repositories:
+    - clojars:
+        type: iBiblio
+        root: "http://clojars.org/repo"
+        contains:
+            - org.clojars.paul -> *
+
