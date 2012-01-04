@@ -1,34 +1,36 @@
 package play.modules.kafka.consumer
 
 import akka.actor._
-import Actor._
-import FSM._
+import akka.actor.Actor._
+import akka.actor.FSM._
+import akka.dispatch.Futures
 import akka.routing._
 import akka.routing.Routing._
-import kafka.consumer.KafkaMessageStream
-import kafka.message.Message
-import scala.actors.Future
-import akka.dispatch.Futures
 import java.util.concurrent.CountDownLatch
+import kafka.consumer.KafkaMessageStream
+import scala.actors.Future
+import kafka.message.Message
+import Types._
+import InternalTypes._
 
-case class ProcessStreams(streams: List[KafkaMessageStream])
-case class ProcessOneMessageFromStream(stream: KafkaMessageStream)
-case class DoneProcessingMessage(stream: KafkaMessageStream)
+private[consumer] object InternalTypes {
+  case class ProcessStreams(streams: List[KafkaMessageStream])
+  case class ProcessOneMessage(stream: KafkaMessageStream)
 
-sealed trait Result
-case object Success extends Result
-case object Failure extends Result
+  case class WorkerResponse(stream: KafkaMessageStream, next: Next)
 
-sealed trait State
-case object Waiting extends State
-case object Processing extends State
-case object Done extends State
+  sealed trait State
+  case object Waiting extends State
+  case object Processing extends State
+  case object Finished extends State
 
-sealed trait Data
-case class Config(numberOfWorkers: Int) extends Data
-case class ConsumerData(router: ActorRef, workers: List[ActorRef]) extends Data
+  sealed trait Data
+  case class Config(numberOfWorkers: Int) extends Data
+  case class WorkerData(router: ActorRef, workers: List[ActorRef]) extends Data
+}
 
-class ConsumerFSM(config: Config, latch: CountDownLatch)(f: Message => Result)
+private[consumer] class ConsumerFSM(
+  config: Config, latch: CountDownLatch)(onMessage: Message => MessageResult)
     extends Actor with FSM[State, Data] {
 
   startWith(Waiting, config)
@@ -36,71 +38,73 @@ class ConsumerFSM(config: Config, latch: CountDownLatch)(f: Message => Result)
   when(Waiting) {
     case Event(ProcessStreams(streams), config: Config) =>
       val data = initData(config)
-      for (stream <- streams) data.router ! ProcessOneMessageFromStream(stream)
+      for (stream <- streams) data.router ! ProcessOneMessage(stream)
       goto(Processing) using data
   }
 
   when(Processing) {
-    case Event(DoneProcessingMessage(stream), ConsumerData(router, workers)) =>
-      router ! ProcessOneMessageFromStream(stream)
-      stay
-
-    case Event(Failure, ConsumerData(router, workers)) =>
-      Futures awaitAll { workers map { _ !!! PoisonPill } }
-      router !! PoisonPill
-      latch.countDown()
-      goto(Done)
+    case Event(WorkerResponse(stream, next), WorkerData(router, workers)) =>
+      next match {
+        case More =>
+          router ! ProcessOneMessage(stream)
+          stay
+        case Stop =>
+          Futures awaitAll { workers map { _ !!! PoisonPill } }
+          router !! PoisonPill
+          latch.countDown()
+          goto(Finished)
+      }
   }
 
   initialize
 
-  private def initData(config: Config): ConsumerData = {
+  private def initData(config: Config): WorkerData = {
     // Create the workers.
     val workers = List.fill(config.numberOfWorkers) {
-      actorOf(new ConsumerWorker(f)).start()
+      actorOf(new ConsumerWorker(onMessage)).start()
     }
 
     // Wrap them with a load-balancing router.
     val router = Routing.loadBalancerActor(
       new SmallestMailboxFirstIterator(workers)).start()
 
-    new ConsumerData(router, workers)
+    new WorkerData(router, workers)
   }
 }
 
-class ConsumerWorker(f: Message => Result) extends Actor {
+private[consumer] class ConsumerWorker(
+    onMessage: Message => MessageResult) extends Actor {
 
   override def receive = {
-    case ProcessOneMessageFromStream(stream) =>
-      val result = processOneMessage(stream)
-      result match {
-        case Success => self reply DoneProcessingMessage(stream)
-        case Failure => self reply Failure
-      }
+    case ProcessOneMessage(stream) => self reply processOneMessage(stream)
   }
 
-  private def processOneMessage(stream: KafkaMessageStream): Result = {
+  private def processOneMessage(stream: KafkaMessageStream): WorkerResponse = {
     val streamIterator = stream.iterator
-    val hasNext = streamIterator.hasNext()
-    hasNext match {
-      case true =>
-        val message = streamIterator.next()
-        processMessage(message)
-      case false =>
-        Failure
+    val next = if (streamIterator.hasNext()) {
+      val message = streamIterator.next()
+      processMessage(message)
+    } else {
+      Stop
     }
+    new WorkerResponse(stream, next)
   }
 
-  private def processMessage(message: Message): Result = {
+  private def processMessage(message: Message): Next = {
     try {
-      f(message)
+      val (current, next) = onMessage(message)
+      current match {
+        case Done          => Unit
+        case TryAgainLater => error("implement producer logic")
+      }
+      next
     } catch {
-      case throwable: Throwable => Failure
+      case throwable: Throwable => More
     }
   }
 }
 
-// Stolen from Akka's FSM.scala (not available in v1)
+// Stolen from Akka's FSM.scala (not available in Akka 1.0)
 object -> {
   def unapply[S](in: (S, S)) = Some(in)
 }
