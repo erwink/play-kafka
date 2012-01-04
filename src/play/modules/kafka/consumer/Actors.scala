@@ -37,21 +37,42 @@ private[consumer] class ConsumerFSM(
 
   when(Waiting) {
     case Event(ProcessStreams(streams), config: Config) =>
-      val data = initData(config)
-      for (stream <- streams) data.router ! ProcessOneMessage(stream)
-      goto(Processing) using data
+      // Initialize the WorkerData from the configuration.
+      val workerData = initData(config)
+
+      // Send each stream off through the router to start.
+      for (stream <- streams) workerData.router ! ProcessOneMessage(stream)
+
+      // Go to state Processing using the current WorkerData.
+      goto(Processing) using workerData
   }
 
   when(Processing) {
     case Event(WorkerResponse(stream, next), WorkerData(router, workers)) =>
       next match {
+        // The normal case. We should keep going.
         case More =>
+          // Use the router to tell a worker to process the returned stream.
           router ! ProcessOneMessage(stream)
-          stay
+
+          // Stay in this state and maintain the same worker data.
+          stay using WorkerData(router, workers)
+
+        // A worker told us to stop.
+        // We will need to stop all workers and go to Finished state.
         case Stop =>
-          Futures awaitAll { workers map { _ !!! PoisonPill } }
+          // Stop all workers and wait for them all to confirm.
+          Futures awaitAll {
+            workers map { _ !!! PoisonPill }
+          }
+
+          // Stop the router as well.
           router !! PoisonPill
+
+          // Countown the latch. This will signal that the job is done.
           latch.countDown()
+
+          // Go to state Finsished. No data is needed.
           goto(Finished)
       }
   }

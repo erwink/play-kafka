@@ -8,6 +8,7 @@ import kafka.message.Message
 import kafka.consumer.KafkaMessageStream
 import Types._
 import InternalTypes._
+import play.Logger
 
 object Types {
   sealed trait Current
@@ -79,20 +80,20 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
   override def doJob() {
 
     if (!checkBeforeStart()) {
+      Logger.warn("Startup precondition failed...will try again soon.")
       return
     }
 
     // Set up the configuration data.
-    val config: Config = new Config(NumberOfWorkers)
+    val config = new Config(NumberOfWorkers)
 
-    // Initialize the count down latch which will be used to block this thread
-    // until the consumer FSM is done.
+    // The CountDownLatch will be used to block until the consumer is done.
     val latch = new CountDownLatch(1)
 
     // Get a list of streams from Kafka API.
-    val streams: List[KafkaMessageStream] = getStreams()
+    val streams = getStreams()
 
-    // Create the consumer FSM.
+    // Create the consumer FSM actor.
     val consumer = new ConsumerFSM(config, latch)(threadSafeProcessMessage _)
     val consumerActor = actorOf(consumer).start
 
