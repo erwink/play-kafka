@@ -1,33 +1,36 @@
 package play.modules.kafka.consumer
 
-import akka.actor._
-import akka.actor.Actor._
-import akka.actor.FSM._
+import akka.actor.Actor
+import akka.actor.ActorRef
+import akka.actor.Actor.actorOf
+import akka.actor.FSM
+import akka.actor.PoisonPill
+import akka.actor.actorRef2Scala
 import akka.dispatch.Futures
-import akka.routing._
-import akka.routing.Routing._
+import akka.routing.Routing
+import akka.routing.SmallestMailboxFirstIterator
 import java.util.concurrent.CountDownLatch
 import kafka.consumer.KafkaMessageStream
-import scala.actors.Future
 import kafka.message.Message
-import Types._
-import InternalTypes._
+import types.MessageResult
+import play.Logger
+import org.apache.commons.lang.exception.ExceptionUtils
 
-private[consumer] object InternalTypes {
-  case class ProcessStreams(streams: List[KafkaMessageStream])
-  case class ProcessOneMessage(stream: KafkaMessageStream)
+case class ProcessStreams(streams: List[KafkaMessageStream])
+case class ProcessOneMessage(stream: KafkaMessageStream)
 
-  case class WorkerResponse(stream: KafkaMessageStream, next: Next)
-
-  sealed trait State
-  case object Waiting extends State
-  case object Processing extends State
-  case object Finished extends State
-
-  sealed trait Data
-  case class Config(numberOfWorkers: Int) extends Data
-  case class WorkerData(router: ActorRef, workers: List[ActorRef]) extends Data
+case class WorkerResponse(stream: KafkaMessageStream, next: Next) {
+  override def toString() = "WorkerResponse: " + next
 }
+
+sealed trait State
+case object Waiting extends State
+case object Processing extends State
+//case object Finished extends State
+
+sealed trait Data
+case class Config(numberOfWorkers: Int) extends Data
+case class WorkerData(router: ActorRef, workers: List[ActorRef]) extends Data
 
 private[consumer] class ConsumerFSM(
   config: Config, latch: CountDownLatch)(onMessage: Message => MessageResult)
@@ -62,18 +65,16 @@ private[consumer] class ConsumerFSM(
         // We will need to stop all workers and go to Finished state.
         case Stop =>
           // Stop all workers and wait for them all to confirm.
-          Futures awaitAll {
-            workers map { _ !!! PoisonPill }
-          }
+          workers foreach { _ ! PoisonPill }
 
           // Stop the router as well.
-          router !! PoisonPill
+          router ! PoisonPill
 
           // Countown the latch. This will signal that the job is done.
           latch.countDown()
 
           // Go to state Finsished. No data is needed.
-          goto(Finished)
+          goto(Waiting) using config
       }
   }
 
@@ -97,7 +98,10 @@ private[consumer] class ConsumerWorker(
     onMessage: Message => MessageResult) extends Actor {
 
   override def receive = {
-    case ProcessOneMessage(stream) => self reply processOneMessage(stream)
+    case ProcessOneMessage(stream) =>
+      // This is VERY defensive. Just give it a supervisor...
+      self reply safely(stream) { processOneMessage _ }
+      Logger.info("I'm still ok!")
   }
 
   private def processOneMessage(stream: KafkaMessageStream): WorkerResponse = {
@@ -121,6 +125,17 @@ private[consumer] class ConsumerWorker(
       next
     } catch {
       case throwable: Throwable => More
+    }
+  }
+
+  private def safely(
+    stream: KafkaMessageStream)(f: KafkaMessageStream => WorkerResponse): WorkerResponse = {
+    try {
+      f(stream)
+    } catch {
+      case error =>
+        Logger.error(ExceptionUtils.getStackTrace(error), "got an error!")
+        WorkerResponse(stream, Stop)
     }
   }
 }

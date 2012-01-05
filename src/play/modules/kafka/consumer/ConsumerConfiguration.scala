@@ -1,33 +1,52 @@
 package play.modules.kafka.consumer
 
-import play.modules.kafka.config
 import kafka.consumer.Consumer
 import kafka.consumer.ConsumerConfig
+import kafka.consumer.ConsumerConnector
+import play.modules.kafka.prop
+import play.modules.kafka.prop._
 
 private[consumer] trait ConsumerConfiguration {
 
   // Configuration for connecting to Kafka as a consumer.
 
-  val KafkaTopic =             config string "kafka.consumer.topic"
-  val NumberOfStreams =        config int    "kafka.consumer.num.streams"
-  val ZookeeperConnectString = config string "kafka.zk.connect.string"
-  val SocketTimeout =          config int    "kafka.consumer.socket.timeout.ms"
-  val AutoCommitInterval =     config int    "kafka.consumer.autocommit.ms"
-  val ConsumerTimeout =        config int    "kafka.consumer.timeout.ms"
-  val GroupId =                config string "kafka.consumer.groupid"
+  // blah
+  val KafkaTopic = prop string "kafka.consumer.topic" mandatory
 
-  lazy val connector = {
-    val consumerProps = config properties (
-      "zk.connect"             -> ZookeeperConnectString,
-      "socket.timeout.ms"      -> SocketTimeout.toString,
-      "socket.timeout.ms"      -> SocketTimeout.toString,
-      "autocommit.interval.ms" -> AutoCommitInterval.toString,
-      "consumer.timeout.ms"    -> ConsumerTimeout.toString,
-      "groupid"                -> GroupId )
-    Consumer.create(new ConsumerConfig(consumerProps))
-  }
+  // blah
+  val GroupId = prop string "kafka.consumer.groupid" mandatory
+
+  // blah
+  val ZkConnect = prop string "kafka.zk.connect.string" mandatory
+
+  // blah
+  val NumStreams = prop int "kafka.consumer.num.streams" default 2
+
+  // blah
+  val SocketTimeout = prop int "kafka.consumer.socket.timeout.ms" default 1000
+
+  // blah
+  val CommitInterval = prop int "kafka.consumer.commit.ms" default 1000
+
+  // blah
+  val ConsumerTimeout = prop int "kafka.consumer.timeout.ms" default 30000
 
   // Other configuration data
 
-  val NumberOfWorkers = config int "play-kafka.consumer.num-workers"
+  // blah
+  val NumberOfWorkers = prop int "play-kafka.consumer.num-workers" mandatory
+
+  // Other setup
+
+  // blah
+  def makeConnector(): ConsumerConnector = {
+    val consumerProps = prop (
+      "zk.connect" -> ZkConnect,
+      "socket.timeout.ms" -> SocketTimeout.toString,
+      "socket.timeout.ms" -> SocketTimeout.toString,
+      "autocommit.interval.ms" -> CommitInterval.toString,
+      "consumer.timeout.ms" -> ConsumerTimeout.toString,
+      "groupid" -> GroupId)
+    Consumer.create(new ConsumerConfig(consumerProps))
+  }
 }

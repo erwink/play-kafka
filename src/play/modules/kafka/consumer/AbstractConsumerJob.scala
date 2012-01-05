@@ -6,23 +6,24 @@ import play.jobs.Job
 import java.util.concurrent.CountDownLatch
 import kafka.message.Message
 import kafka.consumer.KafkaMessageStream
-import Types._
-import InternalTypes._
 import play.Logger
+import org.apache.commons.lang.exception.ExceptionUtils
+import kafka.consumer.ConsumerConnector
 
-object Types {
-  sealed trait Current
-  case object Done extends Current
-  case object TryAgainLater extends Current
+sealed trait Current
+case object Done extends Current
+case object TryAgainLater extends Current
 
-  sealed trait Next
-  case object More extends Next
-  case object Stop extends Next
+sealed trait Next
+case object More extends Next
+case object Stop extends Next
 
+package object types {
   type MessageResult = (Current, Next)
 }
 
 abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
+  import types._
 
   /**
    * Function to be applied to all messages. It is passed the {@link Message} to
@@ -91,24 +92,27 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
     val latch = new CountDownLatch(1)
 
     // Get a list of streams from Kafka API.
-    val streams = getStreams()
+    val connector = makeConnector()
+    val streams = getStreams(connector)
 
     // Create the consumer FSM actor.
-    val consumer = new ConsumerFSM(config, latch)(threadSafeProcessMessage _)
-    val consumerActor = actorOf(consumer).start
+    val consumer = actorOf {
+      new ConsumerFSM(config, latch)(threadSafeProcessMessage _)
+    }.start()
 
     // Tell the consumer FSM to process the streams.
-    consumerActor ! ProcessStreams(streams)
+    consumer ! ProcessStreams(streams)
 
     // Block until the consumer FSM completes.
     latch.await()
 
     // Commit offsets before shutting down.
     connector.commitOffsets
+    connector.shutdown()
   }
 
-  private def getStreams(): List[KafkaMessageStream] = {
-    val map = connector.createMessageStreams(Map(KafkaTopic -> NumberOfStreams))
+  private def getStreams(conn: ConsumerConnector): List[KafkaMessageStream] = {
+    val map = conn.createMessageStreams(Map(KafkaTopic -> NumStreams))
     map(KafkaTopic)
   }
 }
