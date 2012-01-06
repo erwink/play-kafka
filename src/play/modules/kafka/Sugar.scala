@@ -6,7 +6,7 @@ import scala.collection.TraversableLike
 /**
  * Sugar to make using Java API for Play nicer.
  */
-object prop {
+object config {
 
   def string(name: String): Option[String] = {
     Option(play.configuration(name))
@@ -20,9 +20,9 @@ object prop {
     string(name) map (Integer parseInt _)
   }
 
-  implicit def toDefaultable[T](o: Option[T]): D[T] = new D(o)
+  implicit def toProp[T](option: Option[T]): prop[T] = new prop(option)
 
-  def apply(pairs: (String, String)*): Properties = {
+  def properties(pairs: (String, String)*): Properties = {
     val props = new Properties
     pairs foreach { pair => props.put(pair._1, pair._2) }
     props
@@ -32,11 +32,36 @@ object prop {
     extends RuntimeException(message format args)
 }
 
-case class D[T](option: Option[T]) {
+case class prop[T](option: Option[T]) {
   def default(t: T): T = option getOrElse t
+  def or(t: T) = default(t)
+
   def mandatory: T = option match {
     case Some(t) => t
-    case None => throw new prop.ConfigurationException(
+    case None => throw new config.ConfigurationException(
       "mandatory param [%s] not defined")
+  }
+  def ! = mandatory
+}
+
+class safe[A](thing: () => A) {
+  def or(a: A): A = {
+    try {
+      thing.apply()
+    } catch {
+      case error => a
+    }
+  }
+}
+
+object safely {
+  def apply(f: => Unit) {
+    val wrapped = () => f
+    new safe(wrapped) or Unit
+  }
+
+  def apply[A](f: => A): safe[A] = {
+    val wrapped = () => f
+    new safe(wrapped)
   }
 }

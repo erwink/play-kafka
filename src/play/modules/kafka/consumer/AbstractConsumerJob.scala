@@ -2,13 +2,12 @@ package play.modules.kafka.consumer
 
 import akka.actor._
 import akka.actor.Actor._
-import play.jobs.Job
 import java.util.concurrent.CountDownLatch
-import kafka.message.Message
-import kafka.consumer.KafkaMessageStream
-import play.Logger
-import org.apache.commons.lang.exception.ExceptionUtils
 import kafka.consumer.ConsumerConnector
+import kafka.consumer.KafkaMessageStream
+import kafka.message.Message
+import play.Logger
+import play.jobs.Job
 
 sealed trait Current
 case object Done extends Current
@@ -18,18 +17,13 @@ sealed trait Next
 case object More extends Next
 case object Stop extends Next
 
-package object types {
-  type MessageResult = (Current, Next)
-}
-
 abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
-  import types._
 
   /**
    * Function to be applied to all messages. It is passed the {@link Message} to
-   * be processed and should return a {@link MessageResult}.
+   * be processed and should return a result.
    *
-   * The {@link MessageResult} is a pair containing, a {@link Current} result
+   * The result is a pair containing, a {@link Current} result
    * and a {@link Next} instruction. Both have two possible values, and any
    * combination thereof is a valid {@link MessageResult}.
    *
@@ -54,13 +48,12 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
    * a while, take down the jobs, and start up again later.
    *
    * <p>Any exceptions thrown by this function will be caught and the result
-   * will be {@code More}.
-   *
+   * will be {@code (Done, More)}.
    *
    * <p>Note: As implied by the name, this MUST be thread safe as it will be
    * called concurrently by different workers.
    */
-  def threadSafeProcessMessage(message: Message): MessageResult
+  def threadSafeProcessMessage(message: Message): (Current, Next)
 
   /**
    * Override this method to give a precondition to check before starting
@@ -85,7 +78,6 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
       return
     }
 
-    // Set up the configuration data.
     val config = new Config(NumberOfWorkers)
 
     // The CountDownLatch will be used to block until the consumer is done.
@@ -93,14 +85,14 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
 
     // Get a list of streams from Kafka API.
     val connector = makeConnector()
-    val streams = getStreams(connector)
+    val map = connector.createMessageStreams(Map(KafkaTopic -> NumStreams))
+    val streams = map(KafkaTopic)
 
-    // Create the consumer FSM actor.
+    // Create the consumer, start it, and tell it to process the streams.
     val consumer = actorOf {
       new ConsumerFSM(config, latch)(threadSafeProcessMessage _)
-    }.start()
-
-    // Tell the consumer FSM to process the streams.
+    }
+    consumer.start()
     consumer ! ProcessStreams(streams)
 
     // Block until the consumer FSM completes.
@@ -109,10 +101,5 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
     // Commit offsets before shutting down.
     connector.commitOffsets
     connector.shutdown()
-  }
-
-  private def getStreams(conn: ConsumerConnector): List[KafkaMessageStream] = {
-    val map = conn.createMessageStreams(Map(KafkaTopic -> NumStreams))
-    map(KafkaTopic)
   }
 }
