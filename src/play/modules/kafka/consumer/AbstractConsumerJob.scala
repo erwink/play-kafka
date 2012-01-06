@@ -8,6 +8,7 @@ import kafka.consumer.KafkaMessageStream
 import kafka.message.Message
 import play.Logger
 import play.jobs.Job
+import play.modules.kafka.safely
 
 sealed trait Current
 case object Done extends Current
@@ -48,12 +49,14 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
    * a while, take down the jobs, and start up again later.
    *
    * <p>Any exceptions thrown by this function will be caught and the result
-   * will be {@code (Done, More)}.
+   * will be {@code ExceptionalResult}. This value can be overridden.
    *
    * <p>Note: As implied by the name, this MUST be thread safe as it will be
    * called concurrently by different workers.
    */
   def threadSafeProcessMessage(message: Message): (Current, Next)
+
+  val ExceptionalResult = (Done, More)
 
   /**
    * Override this method to give a precondition to check before starting
@@ -67,11 +70,15 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
    * ****************************************************************
    */
 
+  private def onMessage(message: Message): (Current, Next) = {
+    safely { threadSafeProcessMessage(message) } or ExceptionalResult
+  }
+
   /*
    * The main method of the job. Responsible for checking for readiness,
    * connecting to kafka, starting the consumer FSM, and awaiting completion.
    */
-  override def doJob() {
+  override final def doJob() {
 
     if (!checkBeforeStart()) {
       Logger.warn("Startup precondition failed...will try again soon.")
@@ -84,14 +91,12 @@ abstract class AbstractConsumerJob extends Job with ConsumerConfiguration {
     val latch = new CountDownLatch(1)
 
     // Get a list of streams from Kafka API.
-    val connector = makeConnector()
+    val connector = createConnector()
     val map = connector.createMessageStreams(Map(KafkaTopic -> NumStreams))
     val streams = map(KafkaTopic)
 
     // Create the consumer, start it, and tell it to process the streams.
-    val consumer = actorOf {
-      new ConsumerFSM(config, latch)(threadSafeProcessMessage _)
-    }
+    val consumer = actorOf { new ConsumerFSM(config, latch)(onMessage _) }
     consumer.start()
     consumer ! ProcessStreams(streams)
 

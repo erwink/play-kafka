@@ -5,7 +5,6 @@ import akka.actor.Actor._
 import akka.config._
 import akka.config.Supervision._
 import akka.routing._
-import akka.routing._
 import java.util.concurrent.CountDownLatch
 import kafka.consumer.KafkaMessageStream
 import kafka.message.Message
@@ -16,7 +15,7 @@ import play.modules.kafka.safely
 case class ProcessStreams(streams: List[KafkaMessageStream])
 case class ProcessOneMessage(stream: KafkaMessageStream)
 case class WorkerResponse(stream: KafkaMessageStream, next: Next) {
-  // Define toString to not try to call toString on stream, which is unsafe.
+  // Do not call toString on KafkaMessageStream, because it is unsafe.
   override def toString() = "WorkerResponse: Next=[%s]".format(next)
 }
 
@@ -40,15 +39,6 @@ private class ConsumerFSM(
 
   startWith(Waiting, config)
 
-  val strategy = AllForOneStrategy(
-    List(classOf[Exception]), // Any error should restart the system.
-    maxNrOfRetries = 3, withinTimeRange = 5000) // Not needed, won't restart.
-
-  val supervisor = Supervisor(
-    SupervisorConfig(
-      strategy,
-      Supervise(self, Temporary) :: Nil)).start
-
   when(Waiting) {
     case Event(ProcessStreams(streams), config: Config) =>
       // Initialize the WorkerData from the configuration.
@@ -64,29 +54,16 @@ private class ConsumerFSM(
   when(Processing) {
     case Event(WorkerResponse(stream, next), WorkerData(router, workers)) =>
       next match {
-        // The normal case. We should keep going.
         case More =>
-          // Use the router to tell a worker to process the returned stream.
           router ! ProcessOneMessage(stream)
-
-          // Stay in this state and maintain the same worker data.
           stay using WorkerData(router, workers)
 
-        // A worker told us to stop. We will need to stop all workers.
         case Stop =>
-          // Stop all workers and wait for them all to confirm.
           workers foreach { _ ! PoisonPill }
-
-          // Stop the router as well.
           router ! PoisonPill
 
-          // Countown the latch. This will signal that the job is done.
-          latch.countDown()
-
-          Logger.info("shutting down normally")
-
           // Go Finished state. No data is required.
-          goto(Finished)
+          this goto Finished
       }
   }
 
@@ -94,12 +71,20 @@ private class ConsumerFSM(
     case any => stay
   }
 
-  initialize
+  onTransition {
+    case _ -> Finished =>
+      latch.countDown() // Signal that the job is done.
+      Logger.info("shutting down normally")
+    case from -> to =>
+      Logger.info("transitioning from [%s] to [%s]".format(from, to))
+  }
 
   override def postStop() = {
     Logger.warn("shutdown by supervisor")
     latch.countDown()
   }
+
+  initialize
 
   private def initWorkers(config: Config): WorkerData = {
     // Create the workers.
@@ -107,10 +92,14 @@ private class ConsumerFSM(
       actorOf(new Worker(onMessage)).start()
     }
 
-    workers foreach { worker =>
-      worker setLifeCycle Temporary
-      supervisor link worker
-    }
+    val supervisedWorkers = workers map { Supervise(_, temporary) }
+    val supervised = Supervise(self, Temporary) :: supervisedWorkers
+
+    val strategy = AllForOneStrategy(
+      List(classOf[Exception]), // Any Exception should stop the all actors.
+      maxNrOfRetries = 3, withinTimeRange = 5000) // Not needed, won't restart.
+
+    val supervisor = Supervisor(SupervisorConfig(strategy, supervised)).start
 
     // Wrap them with a load-balancing router.
     val router = Routing.loadBalancerActor(

@@ -22,10 +22,10 @@ private[consumer] trait ConsumerConfiguration {
 
   val NumberOfWorkers = config int "play-kafka.consumer.num-workers" or 1
 
-  // Other setup
-
-  // blah
-  def makeConnector(): ConsumerConnector = {
+  /**
+   * Create a {@link ConsumerConnector} instance.
+   */
+  def createConnector(): ConsumerConnector = {
     val consumerProps = config properties (
       "zk.connect" -> ZkConnect,
       "socket.timeout.ms" -> SocketTimeout.toString,
